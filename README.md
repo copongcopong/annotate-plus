@@ -19,7 +19,10 @@ anything.
 
    The Sheet doesn't need to be shared with reviewers — the Apps Script runs as
    you and writes to it directly. Just make sure the Sheet stays in your Google
-   Drive (the script needs access to it).
+   Drive (the script needs access to it). If you want your team to view feedback
+   directly in the Sheet, share it with them as **Viewer** (or **Commenter** if
+   they should add notes). Reviewers on your website never touch the Sheet
+   directly — only the Apps Script does.
 
 2. **Extensions → Apps Script**, paste the contents of
    [`google-sheet.gs`](./google-sheet.gs), and save.
