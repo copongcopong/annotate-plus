@@ -23,7 +23,7 @@ anything.
 3. **Deploy → New deployment → Web app**:
    - Execute as: **Me**
    - Who has access: **Anyone**
-   - Copy the web app URL.
+   - Copy the web app URL. **The production URL always ends with `/exec`** — do not use a `/dev` URL (those are dev deployments only accessible to the script owner).
 
 4. **Set the URL** with `data-google-sheet="<URL>"` on the script tag — reviewers
    never see a setup prompt. Comments push/pull automatically.
