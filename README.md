@@ -1,3 +1,19 @@
+# annotate-plus
+
+> **Fork of [reviewjs](https://github.com/reviewjs/annotate)** with enhancements for production use.
+
+## What's new in this fork
+
+- **Google Sheets sync via `data-google-sheet`** — site owners can pre-configure a Google Apps Script web app URL so reviewers never see a setup prompt. Comments push/pull automatically.
+- **CORS fix** — `gsPull` GET requests no longer send an unnecessary `Content-Type` header that triggered OPTIONS preflight (405 from Google Apps Script). POST requests use `text/plain` instead of `application/json` to avoid preflight entirely.
+- **Stale `GS_URL` fix** — sheet URL changes made via the dialog now actually take effect. Previously the module-level variable was set once at init and never updated.
+- **Cancel / close on sheet modal** — clicking outside, pressing Escape, or clicking "Cancel" dismisses the Google Sheets configuration dialog without changing existing settings.
+- **Customizable launcher text** — the floating Review pill can be customized (currently reads "Review & Add Feedback to website").
+
+## Original readme
+
+---
+
 # reviewjs
 
 ![A Visual screenshot of Annotatejs](./og-image.png)
