@@ -1708,7 +1708,7 @@
     bar.appendChild(offBtn);
     root.appendChild(bar);
 
-    launchEl = el("button", { id: "__an_launch", class: SIDE, html: ICONS.bubble + "<span>Review</span>" });
+    launchEl = el("button", { id: "__an_launch", class: SIDE, html: ICONS.bubble + "<span>Review &amp; Add Feedback to Site's Preview</span>" });
     launchEl.addEventListener("click", function () {
       if (!state.author) askName(function () { setEnabled(true); });
       else setEnabled(true);
@@ -1949,7 +1949,7 @@
       if (root) root.style.display = "none";
       if (launchEl) {
         var n = state.comments.filter(function (c) { return !c.resolved; }).length;
-        launchEl.querySelector("span").textContent = n ? "Review (" + n + ")" : "Review";
+        launchEl.querySelector("span").textContent = n ? "Review & Add Feedback to Site's Preview (" + n + ")" : "Review &amp; Add Feedback to Site's Preview";
         launchEl.classList.add("an-show");
       }
     }
