@@ -1398,8 +1398,9 @@
     if (document.getElementById("__an_sheetwrap")) return;
     var wrap = el("div", { id: "__an_sheetwrap" });
     var input = el("input", { placeholder: "https://script.google.com/macros/s/...", value: state.sheetUrl || "" });
+    var hasExisting = !!state.sheetUrl;
     var connectBtn = el("button", { text: "Connect" });
-    var skipBtn = el("button", { class: "an-ghost2", text: "Skip \u2014 work locally" });
+    var skipBtn = el("button", { class: "an-ghost2", text: hasExisting ? "Cancel" : "Skip \u2014 work locally" });
     var kids = [
       el("h3", { class: "an-nt", text: "Sync to Google Sheets" }),
       el("p", { class: "an-nd", text: "Paste your sheet\u2019s web app URL to save comments there automatically. Comments from other reviewers on the same sheet will appear here too." }),
@@ -1423,6 +1424,8 @@
     kids.push(guideToggle, guideBody);
     var box = el("div", { id: "__an_sheetbox" }, kids);
     wrap.appendChild(box);
+    wrap.addEventListener("click", function (e) { if (e.target === wrap) skip(); });
+    document.addEventListener("keydown", function escSheet(e) { if (e.key === "Escape") { skip(); document.removeEventListener("keydown", escSheet); } });
     document.body.appendChild(wrap);
     var releaseTrap = trapFocus(wrap);
     function connect() {
@@ -1454,7 +1457,7 @@
       if (onDone) onDone();
     }
     function skip() {
-      store.set("an-sheet-skipped", "1");
+      if (!hasExisting) store.set("an-sheet-skipped", "1");
       releaseTrap();
       wrap.remove();
       renderFooter();
@@ -1708,7 +1711,7 @@
     bar.appendChild(offBtn);
     root.appendChild(bar);
 
-    launchEl = el("button", { id: "__an_launch", class: SIDE, html: ICONS.bubble + "<span>Review &amp; Add Feedback to Site's Preview</span>" });
+    launchEl = el("button", { id: "__an_launch", class: SIDE, html: ICONS.bubble + "<span>Review &amp; Add Feedback to website</span>" });
     launchEl.addEventListener("click", function () {
       if (!state.author) askName(function () { setEnabled(true); });
       else setEnabled(true);
@@ -1949,7 +1952,7 @@
       if (root) root.style.display = "none";
       if (launchEl) {
         var n = state.comments.filter(function (c) { return !c.resolved; }).length;
-        launchEl.querySelector("span").textContent = n ? "Review & Add Feedback to Site's Preview (" + n + ")" : "Review &amp; Add Feedback to Site's Preview";
+        launchEl.querySelector("span").textContent = n ? "Review & Add Feedback to website (" + n + ")" : "Review &amp; Add Feedback to website";
         launchEl.classList.add("an-show");
       }
     }
