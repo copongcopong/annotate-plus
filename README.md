@@ -17,6 +17,10 @@ anything.
 
    `annotateId | page | url | type | author | text | color | anchor | geom | resolved | parentId | createdAt | updatedAt`
 
+   The Sheet doesn't need to be shared with reviewers — the Apps Script runs as
+   you and writes to it directly. Just make sure the Sheet stays in your Google
+   Drive (the script needs access to it).
+
 2. **Extensions → Apps Script**, paste the contents of
    [`google-sheet.gs`](./google-sheet.gs), and save.
 
