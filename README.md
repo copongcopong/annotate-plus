@@ -4,7 +4,44 @@
 
 ## What's new in this fork
 
-- **Google Sheets sync via `data-google-sheet`** — site owners can pre-configure a Google Apps Script web app URL so reviewers never see a setup prompt. Comments push/pull automatically.
+### Google Sheets sync
+
+Optionally sync comments to a Google Sheet in real time. The sheet doubles as a
+live review dashboard — every annotation appears as a row, and any collaborator
+with access to the sheet can see, filter, and sort feedback without installing
+anything.
+
+#### Setup
+
+1. **Create a Google Sheet** with this header row:
+
+   `annotateId | page | url | type | author | text | color | anchor | geom | resolved | parentId | createdAt | updatedAt`
+
+2. **Extensions → Apps Script**, paste the contents of
+   [`google-sheet.gs`](./google-sheet.gs), and save.
+
+3. **Deploy → New deployment → Web app**:
+   - Execute as: **Me**
+   - Who has access: **Anyone**
+   - Copy the web app URL.
+
+4. **Set the URL** with `data-google-sheet="<URL>"` on the script tag — reviewers
+   never see a setup prompt. Comments push/pull automatically.
+
+Once connected, comments are pushed to the sheet automatically — create, edit,
+reply, and delete all sync within a few seconds. Comments from other reviewers
+on the same sheet appear when you load the page.
+
+A **Sync now** button in the comments panel footer lets you force a pull at any
+time. Click **Change** in the footer to switch sheets.
+
+> **No Google account required for reviewers.** The Apps Script runs as the
+> sheet owner. Reviewers only need the web app URL.
+
+---
+
+### Other enhancements
+
 - **CORS fix** — `gsPull` GET requests no longer send an unnecessary `Content-Type` header that triggered OPTIONS preflight (405 from Google Apps Script). POST requests use `text/plain` instead of `application/json` to avoid preflight entirely.
 - **Stale `GS_URL` fix** — sheet URL changes made via the dialog now actually take effect. Previously the module-level variable was set once at init and never updated.
 - **Cancel / close on sheet modal** — clicking outside, pressing Escape, or clicking "Cancel" dismisses the Google Sheets configuration dialog without changing existing settings.
@@ -301,42 +338,6 @@ Because everything is local, sharing is an explicit, privacy-friendly action:
 
 You can also drive this from code (see the API below).
 
-
-## Google Sheets sync
-
-Optionally sync comments to a Google Sheet in real time. The sheet doubles as a
-live review dashboard — every annotation appears as a row, and any collaborator
-with access to the sheet can see, filter, and sort feedback without installing
-anything.
-
-### How it works
-
-1. **Create a Google Sheet** with this header row:
-
-   `annotateId | page | url | type | author | text | color | anchor | geom | resolved | parentId | createdAt | updatedAt`
-
-2. **Extensions → Apps Script**, paste the contents of
-   [`google-sheet.gs`](./google-sheet.gs), and save.
-
-3. **Deploy → New deployment → Web app**:
-   - Execute as: **Me**
-   - Who has access: **Anyone**
-   - Copy the web app URL.
-
-4. **Paste the URL** when annotate.js prompts you (or set
-   `data-google-sheet="<URL>"` on the script tag to skip the prompt).
-
-Once connected, comments are pushed to the sheet automatically — create, edit,
-reply, and delete all sync within a few seconds. Comments from other reviewers
-on the same sheet appear when you load the page.
-
-A **Sync now** button in the comments panel footer lets you force a pull at any
-time. Click **Change** in the footer to switch sheets.
-
-> **No Google account required for reviewers.** The Apps Script runs as the
-> sheet owner. Reviewers only need the web app URL.
-
----
 
 ## JavaScript API
 
