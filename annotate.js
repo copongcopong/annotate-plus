@@ -229,15 +229,15 @@
   // Script web app. Configured by the site owner (data-google-sheet) or by
   // the reviewer on first use (askSheet prompt).
   // --------------------------------------------------------------------------
-  var GS_URL = state.sheetUrl;
   var GS_DIRTY = {};
   var GS_TIMER = null;
   var GS_FLUSH_MS = 2000;
   var GS_SYNCING = false;
 
-  function gsEnabled() { return !!GS_URL; }
+  function gsUrl(){ return state.sheetUrl; }
+  function gsEnabled() { return !!state.sheetUrl; }
 
-  function gsHeaders() { return { "Content-Type": "application/json" }; }
+  function gsHeaders() { return { "Content-Type": "text/plain" }; }
 
   // Serialize a comment + its replies into flat rows for the sheet.
   function gsFlatten(c) {
@@ -270,7 +270,7 @@
     if (!gsEnabled()) return;
     var rows = gsFlatten(c);
     rows.forEach(function (row) {
-      fetch(GS_URL, { method: "POST", headers: gsHeaders(),
+      fetch(gsUrl(), { method: "POST", headers: gsHeaders(),
         body: JSON.stringify({ action: "upsert", comment: row }) })
         .catch(function () {});
     });
@@ -281,7 +281,7 @@
     if (!gsEnabled()) return;
     if (!Array.isArray(ids)) ids = [ids];
     ids.forEach(function (id) {
-      fetch(GS_URL, { method: "POST", headers: gsHeaders(),
+      fetch(gsUrl(), { method: "POST", headers: gsHeaders(),
         body: JSON.stringify({ action: "delete", annotateId: id }) })
         .catch(function () {});
     });
@@ -314,8 +314,8 @@
   function gsPull(callback) {
     if (!gsEnabled()) { if (callback) callback(null, "No sheet configured"); return; }
     GS_SYNCING = true;
-    var url = GS_URL + "?page=" + encodeURIComponent(PAGE);
-    fetch(url, { headers: gsHeaders() })
+    var url = gsUrl() + "?page=" + encodeURIComponent(PAGE);
+    fetch(url)
       .then(function (res) { return res.ok ? res.json() : Promise.reject(res); })
       .then(function (data) {
         var incoming = (data && data.comments || []).map(gsRowToComment).filter(Boolean);
@@ -1432,7 +1432,6 @@
         return;
       }
       state.sheetUrl = url;
-      GS_URL = url;
       store.set("an-sheet", url);
       store.set("an-sheet-skipped", "");
       releaseTrap();
