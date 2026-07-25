@@ -194,7 +194,7 @@
       updatedAt: now,
     };
     d.comments.push(c); dbWrite(d);
-    SYNC.markDirty(c);
+    Annotate.sync.markDirty(c);
     return c;
   }
   function patchComment(id, changes) {
@@ -214,7 +214,7 @@
     }
     c.updatedAt = new Date().toISOString();
     dbWrite(d);
-    SYNC.markDirty(c);
+    Annotate.sync.markDirty(c);
     return c;
   }
   function removeComment(id) {
@@ -223,303 +223,10 @@
     var replyIds = c && c.replies ? c.replies.map(function (r) { return r.id; }) : [];
     d.comments = d.comments.filter(function (c) { return c.id !== id; });
     dbWrite(d);
-    SYNC.delete([id].concat(replyIds));
+    Annotate.sync.delete([id].concat(replyIds));
   }
 
 
-  // --------------------------------------------------------------------------
-  // SYNC ENGINE — generic plugin bus for remote sync backends. Plugins
-  // register themselves with push/delete/pull/merge hooks and the engine
-  // fans out every operation across all enabled plugins.
-  // --------------------------------------------------------------------------
-  var SYNC_DIRTY = {};
-  var SYNC_TIMER = null;
-  var SYNC_DEBOUNCE = 2000;
-  var SYNC = {
-    plugins: [],
-    register: function (p) { SYNC.plugins.push(p); },
-
-    anyEnabled: function () {
-      return SYNC.plugins.some(function (p) { return p.enabled(); });
-    },
-
-    markDirty: function (c) {
-      SYNC_DIRTY[c.id] = c;
-      clearTimeout(SYNC_TIMER);
-      SYNC_TIMER = setTimeout(SYNC.flush, SYNC_DEBOUNCE);
-    },
-
-    flush: function () {
-      SYNC_TIMER = null;
-      var ids = Object.keys(SYNC_DIRTY);
-      if (!ids.length) return;
-      var all = dbRead().comments;
-      SYNC.plugins.forEach(function (p) {
-        if (!p.enabled()) return;
-        ids.forEach(function (id) {
-          var c = all.filter(function (x) { return x.id === id; })[0];
-          if (c && !pendingDeletes[id]) try { p.push(c); } catch (e) {}
-        });
-      });
-      SYNC_DIRTY = {};
-    },
-
-    delete: function (ids) {
-      if (!Array.isArray(ids)) ids = [ids];
-      ids.forEach(function (id) {
-        delete SYNC_DIRTY[id];
-      });
-      SYNC.plugins.forEach(function (p) {
-        if (!p.enabled()) return;
-        try { p.delete(ids); } catch (e) {}
-      });
-    },
-
-    pull: function (callback) {
-      var plugins = SYNC.plugins.filter(function (p) { return p.enabled(); });
-      if (!plugins.length) { if (callback) callback([], null); return; }
-      var remaining = plugins.length;
-      var allIncoming = [];
-      plugins.forEach(function (p) {
-        try {
-          p.pull(function (incoming, err) {
-            if (incoming) allIncoming = allIncoming.concat(incoming);
-            remaining--;
-            if (remaining === 0) callback(allIncoming, null);
-          });
-        } catch (e) { remaining--; if (remaining === 0) callback(allIncoming, null); }
-      });
-    },
-
-    // Merge pulled comments from all plugins. Each plugin can provide its
-    // own merge strategy; we call merge() per-plugin on the shared dbRead.
-    mergeAll: function (incoming) {
-      if (!incoming || !incoming.length) return 0;
-      var d = dbRead();
-      var existing = {};
-      d.comments.forEach(function (c, i) { existing[c.id] = i; });
-      var added = 0;
-      incoming.forEach(function (c) {
-        if (!c || !c.id) return;
-        if (existing.hasOwnProperty(c.id)) {
-          if (c.updatedAt >= (d.comments[existing[c.id]].updatedAt || "")) {
-            d.comments[existing[c.id]] = c;
-          }
-        } else {
-          d.comments.push(c);
-          added++;
-        }
-      });
-      dbWrite(d);
-      return added;
-    },
-
-    renderFooter: function (el, n, canShare) {
-      SYNC.plugins.forEach(function (p) {
-        if (!p.renderStatus) return;
-        try { p.renderStatus(el, n, canShare); } catch (e) {}
-      });
-    },
-  };
-  // --------------------------------------------------------------------------
-  // GOOGLE SHEETS plugin — syncs to a Google Sheet via Apps Script.
-  // --------------------------------------------------------------------------
-  var GS_SYNCING = false;
-
-  function gsUrl(){ return state.sheetUrl; }
-  function gsHeaders() { return { "Content-Type": "text/plain" }; }
-
-  function gsFlatten(c) {
-    var rows = [];
-    rows.push({
-      annotateId: c.id, page: c.page, url: c.url, type: c.type,
-      author: c.author, text: c.text, color: c.color,
-      anchor: c.anchor ? JSON.stringify(c.anchor) : "",
-      geom: c.geom ? JSON.stringify(c.geom) : "",
-      resolved: c.resolved,
-      parentId: "",
-      createdAt: c.createdAt, updatedAt: c.updatedAt,
-    });
-    (c.replies || []).forEach(function (r) {
-      rows.push({
-        annotateId: r.id, page: c.page, url: "", type: "reply",
-        author: r.author, text: r.text, color: "",
-        anchor: "", geom: "", resolved: false,
-        parentId: c.id,
-        createdAt: r.createdAt, updatedAt: "",
-      });
-    });
-    return rows;
-  }
-
-  function gsRowToComment(row) {
-    if (!row || !row.annotateId) return null;
-    return {
-      id: row.annotateId, page: row.page || "", url: row.url || "",
-      type: row.type || "", author: row.author || "", text: row.text || "",
-      color: row.color || "", anchor: safeJSON(row.anchor),
-      geom: safeJSON(row.geom),
-      resolved: row.resolved === true || row.resolved === "TRUE" || row.resolved === "true",
-      parentId: row.parentId || "", replies: [],
-      createdAt: row.createdAt || "", updatedAt: row.updatedAt || "",
-    };
-  }
-
-  function gsNest(rows) {
-    var tops = [], byId = {};
-    rows.forEach(function (r) { byId[r.id] = r; });
-    rows.forEach(function (r) {
-      if (r.parentId && byId[r.parentId]) {
-        byId[r.parentId].replies.push({
-          id: r.id, author: r.author, text: r.text, createdAt: r.createdAt,
-        });
-      } else if (!r.parentId) { tops.push(r); }
-    });
-    return tops;
-  }
-
-  SYNC.register({
-    id: "gsheet",
-    name: "Google Sheets",
-    icon: function () { return ICONS.sheets; },
-    enabled: function () { return !!state.sheetUrl; },
-
-    push: function (c) {
-      var rows = gsFlatten(c);
-      rows.forEach(function (row) {
-        fetch(gsUrl(), { method: "POST", headers: gsHeaders(),
-          body: JSON.stringify({ action: "upsert", comment: row }) })
-          .catch(function () {});
-      });
-    },
-
-    delete: function (ids) {
-      if (!Array.isArray(ids)) ids = [ids];
-      ids.forEach(function (id) {
-        fetch(gsUrl(), { method: "POST", headers: gsHeaders(),
-          body: JSON.stringify({ action: "delete", annotateId: id }) })
-          .catch(function () {});
-      });
-    },
-
-    pull: function (cb) {
-      GS_SYNCING = true;
-      var url = gsUrl() + "?page=" + encodeURIComponent(PAGE);
-      fetch(url)
-        .then(function (res) { return res.ok ? res.json() : Promise.reject(res); })
-        .then(function (data) {
-          var incoming = (data && data.comments || []).map(gsRowToComment).filter(Boolean);
-          incoming = gsNest(incoming);
-          GS_SYNCING = false;
-          cb(incoming, null);
-        })
-        .catch(function () {
-          GS_SYNCING = false;
-          cb(null, "Sheet pull failed");
-        });
-    },
-
-    renderStatus: function (el, n, canShare) {
-      if (!this.enabled()) return;
-      var row = document.createElement("div");
-      row.className = "an-localnote";
-      var icon = document.createElement("span");
-      icon.innerHTML = ICONS.sheets;
-      row.appendChild(icon);
-      var text = document.createElement("span");
-      text.textContent = GS_SYNCING ? "Syncing\u2026" : "Synced to Google Sheets \u00B7 ";
-      row.appendChild(text);
-      if (!GS_SYNCING) {
-        var changeBtn = document.createElement("button");
-        changeBtn.className = "an-mini an-ghost2";
-        changeBtn.textContent = "Change";
-        changeBtn.title = "Change Google Sheet";
-        changeBtn.addEventListener("click", function () {
-          askSheet(function () { renderFooter(); });
-        });
-        row.appendChild(changeBtn);
-      }
-      el.appendChild(row);
-    },
-  });
-
-
-  function safeJSON(v) {
-    if (typeof v !== "string" || !v) return v;
-    try { return JSON.parse(v); } catch (e) { return v; }
-  }
-
-  // --------------------------------------------------------------------------
-  // HONO SYNC plugin — syncs to a Hono API endpoint that stores comments as
-  // JSON files. No flat-row conversion needed — full comment objects.
-  // --------------------------------------------------------------------------
-  var HONO_SYNCING = false;
-
-  function honoUrl(){ return state.honoUrl; }
-
-  function honoDomain() {
-    try { return location.hostname; } catch (e) { return "unknown"; }
-  }
-
-  SYNC.register({
-    id: "hono",
-    name: "Hono Sync",
-    icon: function () { return ICONS.download; },
-    enabled: function () { return !!state.honoUrl; },
-
-    push: function (c) {
-      fetch(honoUrl(), { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "upsert", comment: c }) })
-        .catch(function () {});
-    },
-
-    delete: function (ids) {
-      if (!Array.isArray(ids)) ids = [ids];
-      ids.forEach(function (id) {
-        fetch(honoUrl(), { method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "delete", annotateId: id }) })
-          .catch(function () {});
-      });
-    },
-
-    pull: function (cb) {
-      HONO_SYNCING = true;
-      var url = honoUrl() + "?domain=" + encodeURIComponent(honoDomain()) + "&page=" + encodeURIComponent(PAGE);
-      fetch(url)
-        .then(function (res) { return res.ok ? res.json() : Promise.reject(res); })
-        .then(function (data) {
-          HONO_SYNCING = false;
-          cb((data && data.comments) || [], null);
-        })
-        .catch(function () {
-          HONO_SYNCING = false;
-          cb(null, "Hono pull failed");
-        });
-    },
-
-    renderStatus: function (el, n, canShare) {
-      if (!this.enabled()) return;
-      var row = document.createElement("div");
-      row.className = "an-localnote";
-      var icon = document.createElement("span");
-      icon.innerHTML = ICONS.download;
-      row.appendChild(icon);
-      var text = document.createElement("span");
-      text.textContent = HONO_SYNCING ? "Syncing\u2026" : "Synced to Hono \u00B7 ";
-      row.appendChild(text);
-      if (!HONO_SYNCING) {
-        var changeBtn = document.createElement("button");
-        changeBtn.className = "an-mini an-ghost2";
-        changeBtn.textContent = "Change";
-        changeBtn.title = "Change Hono URL";
-        changeBtn.addEventListener("click", function () {
-          askHono(function () { renderFooter(); });
-        });
-        row.appendChild(changeBtn);
-      }
-      el.appendChild(row);
-    },
-  });
 
   // unique-ish css selector for an element (for re-anchoring overlays)
   function cssPath(node) {
@@ -1591,9 +1298,9 @@
       renderFooter();
       // Pull from the newly configured sheet.
       if (url) {
-        SYNC.pull(function (incoming, err) {
+        Annotate.sync.pull(function (incoming, err) {
           if (incoming && incoming.length) {
-            var added = SYNC.mergeAll(incoming);
+            var added = Annotate.sync.mergeAll(incoming);
             if (added > 0) {
               state.comments = pageComments().filter(function (c) { return !pendingDeletes[c.id]; });
               renderAll(); renderPanel();
@@ -1641,9 +1348,9 @@
       wrap.remove();
       renderFooter();
       if (url) {
-        SYNC.pull(function (incoming, err) {
+        Annotate.sync.pull(function (incoming, err) {
           if (incoming && incoming.length) {
-            var added = SYNC.mergeAll(incoming);
+            var added = Annotate.sync.mergeAll(incoming);
             if (added > 0) {
               state.comments = pageComments().filter(function (c) { return !pendingDeletes[c.id]; });
               renderAll(); renderPanel();
@@ -2516,7 +2223,7 @@
     var n = state.comments.length;
     var canShare = !!(state.share && state.share.trim());
     var hasSheet = !!state.sheetUrl;
-    var anySync = SYNC.anyEnabled();
+    var anySync = Annotate.sync.anyEnabled();
     footEl.innerHTML = "";
 
     // Base status line
@@ -2539,18 +2246,18 @@
     footEl.appendChild(el("div", { class: "an-localnote" }, statusKids));
 
     // Let each plugin render its status line
-    SYNC.renderFooter(footEl, n, canShare);
+    Annotate.sync.renderFooter(footEl, n, canShare);
 
     // Button row
     var btnRow = [];
     btnRow.push(el("button", { class: "an-fbtn" + (n ? " an-pulse" : ""), title: "Download comments as JSON", html: ICONS.download + "<span>Download</span>", onclick: exportComments }));
     if (anySync) {
       btnRow.push(el("button", { class: "an-fbtn", title: "Pull latest from all sync targets", html: ICONS.sheets + "<span>Sync now</span>", onclick: function () {
-        SYNC.flush();
+        Annotate.sync.flush();
         renderFooter();
-        SYNC.pull(function (incoming, err) {
+        Annotate.sync.pull(function (incoming, err) {
           if (incoming && incoming.length) {
-            var added = SYNC.mergeAll(incoming);
+            var added = Annotate.sync.mergeAll(incoming);
             if (added > 0) {
               state.comments = pageComments().filter(function (c) { return !pendingDeletes[c.id]; });
               renderAll(); renderPanel();
@@ -2744,10 +2451,10 @@
         if (state.comments.some(function (c) { return c.id === target; }))
           setTimeout(function () { focusComment(target, false); }, 150);
       }
-      if (SYNC.anyEnabled()) {
-        SYNC.pull(function (incoming, err) {
+      if (Annotate.sync.anyEnabled()) {
+        Annotate.sync.pull(function (incoming, err) {
           if (incoming && incoming.length) {
-            var added = SYNC.mergeAll(incoming);
+            var added = Annotate.sync.mergeAll(incoming);
             if (added > 0) {
               state.comments = pageComments().filter(function (c) { return !pendingDeletes[c.id]; });
               renderAll(); renderPanel();
@@ -2802,6 +2509,38 @@
       d.comments = d.comments.filter(function (c) { return c.page !== PAGE; });
       dbWrite(d);
       load();
+    },
+
+    // Sync plugin bus — no-ops until sync-engine.js replaces them.
+    sync: {
+      register:   function (){},
+      markDirty:  function (){},
+      delete:     function (){},
+      flush:      function (){},
+      anyEnabled: function (){ return false; },
+      pull:       function (cb){ if(cb) cb([],null); },
+      mergeAll:   function (incoming){ return 0; },
+      renderFooter:function (){},
+    },
+
+    // Semi-private internals for sync plugins.
+    _internals: {
+      dbRead: dbRead,
+      dbWrite: dbWrite,
+      pageComments: pageComments,
+      pendingDeletes: pendingDeletes,
+      renderAll: renderAll,
+      renderPanel: renderPanel,
+      renderFooter: renderFooter,
+      PAGE: PAGE,
+      state: state,
+      ICONS: ICONS,
+      el: el,
+      toast: toast,
+      trapFocus: trapFocus,
+      store: store,
+      askSheet: askSheet,
+      askHono: askHono,
     },
   };
 

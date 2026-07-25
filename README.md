@@ -47,14 +47,41 @@ time. Click **Change** in the footer to switch sheets.
 
 ---
 
+### Hono sync
+
+Sync comments to a self-hosted Hono API that stores them as JSON files.
+
+```bash
+cd hono-server && npm install && npm start    # runs on :3099
+```
+
+Add `data-hono-url="http://localhost:3099/api/sync"` to the script tag, or
+click **Connect hono** in the footer.
+
+### Plugin-based sync architecture
+
+Sync backends are loaded as separate script files, so you only ship what you
+need:
+
+```html
+<script src="./annotate.js" defer></script>
+<script src="./sync-engine.js" defer></script>         <!-- required for any sync -->
+<script src="./sync-google-sheet.js" defer></script>    <!-- Google Sheets plugin -->
+<script src="./sync-hono.js" defer></script>             <!-- Hono sync plugin -->
+```
+
+Each plugin registers via `Annotate.sync.register({...})`. The engine fans out
+create/update/delete/pull across all enabled plugins. Plugins communicate
+through `Annotate._internals` — no build step, no bundler.
+
 ### Other enhancements
 
+- **Plugin-based sync engine** — pluggable remote backends, add your own by implementing `{push, delete, pull, renderStatus}` and calling `Annotate.sync.register()`.
+- **Hono sync server** — `hono-server/` with `POST/GET /api/sync`, stores data as `data/<domain>/<page>.json`. 9 test cases included.
 - **CORS fix** — `gsPull` GET requests no longer send an unnecessary `Content-Type` header that triggered OPTIONS preflight (405 from Google Apps Script). POST requests use `text/plain` instead of `application/json` to avoid preflight entirely.
 - **Stale `GS_URL` fix** — sheet URL changes made via the dialog now actually take effect. Previously the module-level variable was set once at init and never updated.
 - **Cancel / close on sheet modal** — clicking outside, pressing Escape, or clicking "Cancel" dismisses the Google Sheets configuration dialog without changing existing settings.
 - **Customizable launcher text** — the floating Review pill can be customized (currently reads "Review & Add Feedback to website").
-
-## Original readme
 
 ---
 
