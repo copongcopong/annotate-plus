@@ -55,6 +55,7 @@
     startOpen: truthy(scriptData.startOpen || globalConfig.startOpen),
     note: scriptData.note || globalConfig.note || "",
     share: String(scriptData.shareEmail || globalConfig.shareEmail || "").trim(),
+    googleSheet: String(scriptData.googleSheet || globalConfig.googleSheet || "").trim(),
   };
   var PAGE = (CFG.project ? CFG.project + ":" : "") + CFG.page;
 
@@ -84,6 +85,7 @@
     // the embed script — they are static and never edited by the reviewer.
     note: CFG.note || "",
     share: CFG.share || "",
+    sheetUrl: CFG.googleSheet || store.get("an-sheet") || "",
     comments: [],
     panelOpen: false,
     activeId: null,
@@ -190,6 +192,7 @@
       updatedAt: now,
     };
     d.comments.push(c); dbWrite(d);
+    gsMarkDirty(c);
     return c;
   }
   function patchComment(id, changes) {
@@ -209,12 +212,188 @@
     }
     c.updatedAt = new Date().toISOString();
     dbWrite(d);
+    gsMarkDirty(c);
     return c;
   }
   function removeComment(id) {
     var d = dbRead();
+    var c = d.comments.filter(function (x) { return x.id === id; })[0];
+    var replyIds = c && c.replies ? c.replies.map(function (r) { return r.id; }) : [];
     d.comments = d.comments.filter(function (c) { return c.id !== id; });
     dbWrite(d);
+    gsDelete([id].concat(replyIds));
+  }
+
+  // --------------------------------------------------------------------------
+  // GOOGLE SHEETS SYNC — push/pull comments to a Google Sheet via an Apps
+  // Script web app. Configured by the site owner (data-google-sheet) or by
+  // the reviewer on first use (askSheet prompt).
+  // --------------------------------------------------------------------------
+  var GS_URL = state.sheetUrl;
+  var GS_DIRTY = {};
+  var GS_TIMER = null;
+  var GS_FLUSH_MS = 2000;
+  var GS_SYNCING = false;
+
+  function gsEnabled() { return !!GS_URL; }
+
+  function gsHeaders() { return { "Content-Type": "application/json" }; }
+
+  // Serialize a comment + its replies into flat rows for the sheet.
+  function gsFlatten(c) {
+    var rows = [];
+    // Top-level comment row
+    rows.push({
+      annotateId: c.id, page: c.page, url: c.url, type: c.type,
+      author: c.author, text: c.text, color: c.color,
+      anchor: c.anchor ? JSON.stringify(c.anchor) : "",
+      geom: c.geom ? JSON.stringify(c.geom) : "",
+      resolved: c.resolved,
+      parentId: "",
+      createdAt: c.createdAt, updatedAt: c.updatedAt,
+    });
+    // One row per reply
+    (c.replies || []).forEach(function (r) {
+      rows.push({
+        annotateId: r.id, page: c.page, url: "", type: "reply",
+        author: r.author, text: r.text, color: "",
+        anchor: "", geom: "", resolved: false,
+        parentId: c.id,
+        createdAt: r.createdAt, updatedAt: "",
+      });
+    });
+    return rows;
+  }
+
+  // Push one comment + its replies to the sheet.
+  function gsPush(c) {
+    if (!gsEnabled()) return;
+    var rows = gsFlatten(c);
+    rows.forEach(function (row) {
+      fetch(GS_URL, { method: "POST", headers: gsHeaders(),
+        body: JSON.stringify({ action: "upsert", comment: row }) })
+        .catch(function () {});
+    });
+  }
+
+  // Delete rows by annotateId from the sheet. Accepts a single ID or an array.
+  function gsDelete(ids) {
+    if (!gsEnabled()) return;
+    if (!Array.isArray(ids)) ids = [ids];
+    ids.forEach(function (id) {
+      fetch(GS_URL, { method: "POST", headers: gsHeaders(),
+        body: JSON.stringify({ action: "delete", annotateId: id }) })
+        .catch(function () {});
+    });
+  }
+
+  // Mark a comment dirty and schedule a flush.
+  function gsMarkDirty(c) {
+    if (!gsEnabled()) return;
+    GS_DIRTY[c.id] = c;
+    clearTimeout(GS_TIMER);
+    GS_TIMER = setTimeout(gsFlush, GS_FLUSH_MS);
+  }
+
+  // Push all dirty comments at once.
+  function gsFlush() {
+    GS_TIMER = null;
+    if (!gsEnabled()) return;
+    var ids = Object.keys(GS_DIRTY);
+    if (!ids.length) return;
+    // Re-read from dbRead so we push the latest state.
+    var all = dbRead().comments;
+    ids.forEach(function (id) {
+      var c = all.filter(function (x) { return x.id === id; })[0];
+      if (c && !pendingDeletes[id]) gsPush(c);
+    });
+    GS_DIRTY = {};
+  }
+
+  // Pull all comments for the current page from the sheet.
+  function gsPull(callback) {
+    if (!gsEnabled()) { if (callback) callback(null, "No sheet configured"); return; }
+    GS_SYNCING = true;
+    var url = GS_URL + "?page=" + encodeURIComponent(PAGE);
+    fetch(url, { headers: gsHeaders() })
+      .then(function (res) { return res.ok ? res.json() : Promise.reject(res); })
+      .then(function (data) {
+        var incoming = (data && data.comments || []).map(gsRowToComment).filter(Boolean);
+        // Reconstruct nested replies from flat rows
+        incoming = gsNest(incoming);
+        GS_SYNCING = false;
+        if (callback) callback(incoming, null);
+      })
+      .catch(function () {
+        GS_SYNCING = false;
+        if (callback) callback(null, "Sheet pull failed");
+      });
+  }
+
+  // Convert a flat sheet row to a comment-like object.
+  function gsRowToComment(row) {
+    if (!row || !row.annotateId) return null;
+    return {
+      id: row.annotateId,
+      page: row.page || "",
+      url: row.url || "",
+      type: row.type || "",
+      author: row.author || "",
+      text: row.text || "",
+      color: row.color || "",
+      anchor: safeJSON(row.anchor),
+      geom: safeJSON(row.geom),
+      resolved: row.resolved === true || row.resolved === "TRUE" || row.resolved === "true",
+      parentId: row.parentId || "",
+      replies: [],
+      createdAt: row.createdAt || "",
+      updatedAt: row.updatedAt || "",
+    };
+  }
+
+  // Nest flat rows: rows with parentId become replies on their parent.
+  function gsNest(rows) {
+    var tops = [], byId = {};
+    rows.forEach(function (r) { byId[r.id] = r; });
+    rows.forEach(function (r) {
+      if (r.parentId && byId[r.parentId]) {
+        byId[r.parentId].replies.push({
+          id: r.id, author: r.author, text: r.text,
+          createdAt: r.createdAt,
+        });
+      } else if (!r.parentId) {
+        tops.push(r);
+      }
+    });
+    return tops;
+  }
+
+  function safeJSON(v) {
+    if (typeof v !== "string" || !v) return v;
+    try { return JSON.parse(v); } catch (e) { return v; }
+  }
+
+  // Merge pulled comments into local storage. Server wins for matching IDs
+  // when the server record is newer.
+  function gsMerge(incoming) {
+    if (!incoming || !incoming.length) return 0;
+    var d = dbRead();
+    var existing = {};
+    d.comments.forEach(function (c, i) { existing[c.id] = i; });
+    var added = 0;
+    incoming.forEach(function (c) {
+      if (!c || !c.id) return;
+      if (existing.hasOwnProperty(c.id)) {
+        if (c.updatedAt >= (d.comments[existing[c.id]].updatedAt || "")) {
+          d.comments[existing[c.id]] = c;
+        }
+      } else {
+        d.comments.push(c);
+        added++;
+      }
+    });
+    dbWrite(d);
+    return added;
   }
 
   // unique-ish css selector for an element (for re-anchoring overlays)
@@ -273,6 +452,7 @@
   var CSS_TEXT = `
   :root {
     --an-font: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    --an-mono: "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", monospace;
     --an-surface: #ffffff;
     --an-surface-2: #f6f6f8;
     --an-glass: rgba(255,255,255,.85);
@@ -306,7 +486,7 @@
 
   #__an_root, #__an_root *, #__an_compose, #__an_compose *,
   #__an_toasts, #__an_toasts *, #__an_namewrap, #__an_namewrap *,
-  #__an_sharewrap, #__an_sharewrap *, #__an_launch, #__an_launch *,
+  #__an_sheetwrap, #__an_sheetwrap *, #__an_sharewrap, #__an_sharewrap *,
   #__an_plus, #__an_plus * { box-sizing: border-box; }
 
   .an-mark { border-radius: 2px; padding: .04em 0; cursor: pointer;
@@ -566,6 +746,42 @@
     font-size:11px; letter-spacing:.04em; text-transform:uppercase;
     color: var(--an-muted); margin-bottom:3px; }
 
+
+  /* ---- sheet dialog ------------------------------------------------------ */
+  #__an_sheetwrap { position:fixed; inset:0; z-index:2147483400;
+    background:rgba(14,14,22,.45); backdrop-filter:blur(4px);
+    display:flex; align-items:center; justify-content:center;
+    font-family: var(--an-font); }
+  #__an_sheetbox { background: var(--an-surface); color: var(--an-fg);
+    width:420px; max-width:92vw; border-radius:18px;
+    padding:26px 26px 22px; box-shadow: var(--an-shadow-lg);
+    animation: an-pop .22s cubic-bezier(.34,1.56,.64,1);
+    max-height:calc(100vh - 32px); overflow-y:auto; }
+  #__an_sheetbox .an-nt { font:700 19px/1.2 var(--an-font); letter-spacing:-.01em; margin:0 0 6px; }
+  #__an_sheetbox .an-nd { font-size:13.5px; color: var(--an-muted); line-height:1.5; margin:0 0 18px; }
+  #__an_sheetbox input { width:100%; border:1.5px solid var(--an-border-strong);
+    background: var(--an-surface); color: var(--an-fg); border-radius:11px;
+    padding:12px 14px; font:15px var(--an-font); outline:none; margin-bottom:14px; }
+  #__an_sheetbox input:focus { border-color: var(--an-btn-bg); }
+  #__an_sheetbox .an-srow { display:flex; gap:8px; margin-bottom:14px; }
+  #__an_sheetbox .an-srow button { flex:1; background: var(--an-btn-bg); color: var(--an-btn-fg);
+    border:none; border-radius:11px; padding:12px; font:600 14px var(--an-font);
+    cursor:pointer; transition: filter .15s; }
+  #__an_sheetbox .an-srow button:hover { filter: brightness(1.15); }
+  #__an_sheetbox .an-srow button.an-ghost2 { background: var(--an-surface-2);
+    color: var(--an-fg); border:1px solid var(--an-border-strong); }
+  #__an_sheetbox .an-guide { background: var(--an-surface-2);
+    border:1px solid var(--an-border); border-radius:11px;
+    padding:12px 14px; margin-top:8px; font:13px/1.6 var(--an-font);
+    color: var(--an-muted); }
+  #__an_sheetbox .an-guide p { margin:0 0 6px; }
+  #__an_sheetbox .an-guide p:last-child { margin-bottom:0; }
+  #__an_sheetbox .an-guide b { color: var(--an-fg); }
+  #__an_sheetbox .an-guide code { font:12px var(--an-mono); background:var(--an-surface);
+    padding:1px 5px; border-radius:4px; }
+  #__an_sheetbox .an-mini { font:500 12px var(--an-font); color: var(--an-muted);
+    background:none; border:none; cursor:pointer; padding:4px 0; }
+  #__an_sheetbox .an-mini:hover { color: var(--an-fg); }
   /* ---- share dialog ------------------------------------------------------ */
   #__an_sharewrap { position:fixed; inset:0; z-index:2147483400;
     background:rgba(14,14,22,.45); backdrop-filter:blur(4px);
@@ -757,6 +973,7 @@
     share: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4"/></svg>',
     copy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
     mail: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4.5" width="19" height="15" rx="2"/><path d="M3 6l9 6 9-6"/></svg>',
+    sheets: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18"/></svg>',
   };
 
   // ==========================================================================
@@ -1174,6 +1391,79 @@
     }
     btn.addEventListener("click", done);
     input.addEventListener("keydown", function (e) { if (e.key === "Enter") done(); });
+    setTimeout(function () { input.focus(); }, 40);
+  }
+
+  function askSheet(onDone) {
+    if (document.getElementById("__an_sheetwrap")) return;
+    var wrap = el("div", { id: "__an_sheetwrap" });
+    var input = el("input", { placeholder: "https://script.google.com/macros/s/...", value: state.sheetUrl || "" });
+    var connectBtn = el("button", { text: "Connect" });
+    var skipBtn = el("button", { class: "an-ghost2", text: "Skip \u2014 work locally" });
+    var kids = [
+      el("h3", { class: "an-nt", text: "Sync to Google Sheets" }),
+      el("p", { class: "an-nd", text: "Paste your sheet\u2019s web app URL to save comments there automatically. Comments from other reviewers on the same sheet will appear here too." }),
+    ];
+    kids.push(input);
+    kids.push(el("div", { class: "an-srow" }, [connectBtn, skipBtn]));
+    // Collapsible setup guide
+    var guideToggle = el("button", { class: "an-mini an-ghost2", text: "How to set this up \u25BE" });
+    var guideBody = el("div", { class: "an-guide" }, [
+      el("p", {}, [el("b", { text: "1." }), document.createTextNode(" Open your Google Sheet, go to Extensions \u2192 Apps Script.")]),
+      el("p", {}, [el("b", { text: "2." }), document.createTextNode(" Paste the script from "), el("code", { text: "google-sheet.gs" }), document.createTextNode(", then click Deploy \u2192 New deployment \u2192 Web app.")]),
+      el("p", {}, [el("b", { text: "3." }), document.createTextNode(" Set \u201CExecute as\u201D to \u201CMe\u201D and \u201CWho has access\u201D to \u201CAnyone\u201D, then deploy.")]),
+      el("p", {}, [el("b", { text: "4." }), document.createTextNode(" Copy the web app URL and paste it above.")]),
+    ]);
+    guideBody.style.display = "none";
+    guideToggle.addEventListener("click", function () {
+      var open = guideBody.style.display !== "none";
+      guideBody.style.display = open ? "none" : "";
+      guideToggle.textContent = open ? "How to set this up \u25BE" : "How to set this up \u25B4";
+    });
+    kids.push(guideToggle, guideBody);
+    var box = el("div", { id: "__an_sheetbox" }, kids);
+    wrap.appendChild(box);
+    document.body.appendChild(wrap);
+    var releaseTrap = trapFocus(wrap);
+    function connect() {
+      var url = input.value.trim();
+      if (url && !/^https:\/\/script\.google(?:apis)?\.com\//.test(url)) {
+        toast("That doesn\u2019t look like a Google Apps Script URL. It should start with https://script.google.com/", { kind: "error" });
+        return;
+      }
+      state.sheetUrl = url;
+      GS_URL = url;
+      store.set("an-sheet", url);
+      store.set("an-sheet-skipped", "");
+      releaseTrap();
+      wrap.remove();
+      renderFooter();
+      // Pull from the newly configured sheet.
+      if (url) {
+        gsPull(function (incoming, err) {
+          if (incoming) {
+            var added = gsMerge(incoming);
+            if (added > 0) {
+              state.comments = pageComments().filter(function (c) { return !pendingDeletes[c.id]; });
+              renderAll(); renderPanel();
+            }
+          } else if (err) {
+            toast("Couldn\u2019t reach the sheet. Check the URL and try again.", { kind: "error" });
+          }
+        });
+      }
+      if (onDone) onDone();
+    }
+    function skip() {
+      store.set("an-sheet-skipped", "1");
+      releaseTrap();
+      wrap.remove();
+      renderFooter();
+      if (onDone) onDone();
+    }
+    connectBtn.addEventListener("click", connect);
+    skipBtn.addEventListener("click", skip);
+    input.addEventListener("keydown", function (e) { if (e.key === "Enter") connect(); });
     setTimeout(function () { input.focus(); }, 40);
   }
 
@@ -2027,15 +2317,50 @@
     if (!footEl) return;
     var n = state.comments.length;
     var canShare = !!(state.share && state.share.trim());
+    var hasSheet = gsEnabled();
     footEl.innerHTML = "";
-    footEl.appendChild(el("div", { class: "an-localnote" }, [
-      el("span", { html: ICONS.info }),
-      el("span", { text: canShare
+
+    // Status line
+    var statusKids = [el("span", { html: hasSheet ? ICONS.sheets : ICONS.info })];
+    if (hasSheet) {
+      statusKids.push(el("span", { text: GS_SYNCING ? "Syncing\u2026" : "Synced to Google Sheets \u00B7 " }));
+      if (!GS_SYNCING) {
+        statusKids.push(el("button", { class: "an-mini an-ghost2", text: "Change", title: "Change Google Sheet", onclick: function () {
+          askSheet(function () { renderFooter(); });
+        } }));
+      }
+    } else {
+      statusKids.push(el("span", { text: canShare
         ? "Saved in this browser. Download or share to send your comments."
-        : "Saved in this browser. Download to send your comments." }),
-    ]));
+        : "Saved in this browser. Download to send your comments." }));
+      if (!CFG.googleSheet) {
+        statusKids.push(el("button", { class: "an-mini an-ghost2", text: "Connect sheet", title: "Sync to Google Sheets", onclick: function () {
+          askSheet(function () { renderFooter(); });
+        } }));
+      }
+    }
+    footEl.appendChild(el("div", { class: "an-localnote" }, statusKids));
+
+    // Button row
     footEl.appendChild(el("div", { class: "an-footrow" }, [
       el("button", { class: "an-fbtn" + (n ? " an-pulse" : ""), title: "Download comments as JSON", html: ICONS.download + "<span>Download</span>", onclick: exportComments }),
+      hasSheet ? el("button", { class: "an-fbtn", title: "Pull latest from sheet", html: ICONS.sheets + "<span>Sync now</span>", onclick: function () {
+        gsFlush();
+        renderFooter();
+        gsPull(function (incoming, err) {
+          if (incoming) {
+            var added = gsMerge(incoming);
+            if (added > 0) {
+              state.comments = pageComments().filter(function (c) { return !pendingDeletes[c.id]; });
+              renderAll(); renderPanel();
+            }
+            toast("Synced" + (added > 0 ? " \u2014 " + added + " new comment" + (added === 1 ? "" : "s") : ""), { kind: "success" });
+          } else {
+            toast("Sync failed \u2014 check your sheet URL", { kind: "error" });
+          }
+          renderFooter();
+        });
+      } }) : null,
       canShare ? el("button", { class: "an-fbtn", title: "Send comments to " + state.share, html: ICONS.share + "<span>Share</span>", onclick: shareComments }) : null,
       el("button", { class: "an-fbtn", html: ICONS.upload + "<span>Import</span>", onclick: pickImportFile }),
     ]));
@@ -2216,6 +2541,18 @@
         var target = decodeURIComponent(m[1]);
         if (state.comments.some(function (c) { return c.id === target; }))
           setTimeout(function () { focusComment(target, false); }, 150);
+      }
+      // Pull from Google Sheets on first load.
+      if (gsEnabled()) {
+        gsPull(function (incoming, err) {
+          if (incoming) {
+            var added = gsMerge(incoming);
+            if (added > 0) {
+              state.comments = pageComments().filter(function (c) { return !pendingDeletes[c.id]; });
+              renderAll(); renderPanel();
+            }
+          }
+        });
       }
     }
   }

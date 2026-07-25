@@ -106,6 +106,7 @@ Configure with `data-` attributes on the script tag — all optional:
 | `data-start-open` | `false` | Set to `true` to show the review toolbar immediately instead of the collapsed Review pill. |
 | `data-note` | — | Author's note to reviewers — what should be reviewed. Shown when they start and atop the comments panel. |
 | `data-share-email` | — | Where reviewers send comments: an email address, or a Slack / Hangout link. Adds a **Share** button. |
+| `data-google-sheet` | — | Deployed Google Apps Script web app URL for auto-sync. Reviewers are prompted for this on first use if not set. |
 
 Prefer JS config? Set `window.AnnotateConfig` **before** the script loads:
 
@@ -283,6 +284,41 @@ Because everything is local, sharing is an explicit, privacy-friendly action:
    reappears anchored in place.
 
 You can also drive this from code (see the API below).
+
+
+## Google Sheets sync
+
+Optionally sync comments to a Google Sheet in real time. The sheet doubles as a
+live review dashboard — every annotation appears as a row, and any collaborator
+with access to the sheet can see, filter, and sort feedback without installing
+anything.
+
+### How it works
+
+1. **Create a Google Sheet** with this header row:
+
+   `annotateId | page | url | type | author | text | color | anchor | geom | resolved | parentId | createdAt | updatedAt`
+
+2. **Extensions → Apps Script**, paste the contents of
+   [`google-sheet.gs`](./google-sheet.gs), and save.
+
+3. **Deploy → New deployment → Web app**:
+   - Execute as: **Me**
+   - Who has access: **Anyone**
+   - Copy the web app URL.
+
+4. **Paste the URL** when annotate.js prompts you (or set
+   `data-google-sheet="<URL>"` on the script tag to skip the prompt).
+
+Once connected, comments are pushed to the sheet automatically — create, edit,
+reply, and delete all sync within a few seconds. Comments from other reviewers
+on the same sheet appear when you load the page.
+
+A **Sync now** button in the comments panel footer lets you force a pull at any
+time. Click **Change** in the footer to switch sheets.
+
+> **No Google account required for reviewers.** The Apps Script runs as the
+> sheet owner. Reviewers only need the web app URL.
 
 ---
 
